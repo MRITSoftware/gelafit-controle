@@ -10,7 +10,6 @@ import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 
 @Composable
-@Composable
 fun StatusScreen(navController: NavController) {
     val context = navController.context
     val prefs = remember { context.getSharedPreferences("device_prefs", Context.MODE_PRIVATE) }

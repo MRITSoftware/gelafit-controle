@@ -1,77 +1,87 @@
-    suspend fun markCommandExecuted(commandId: String): Boolean = withContext(Dispatchers.IO) {
-        val json = """{"executed":true,"executed_at":"${java.time.Instant.now()}"}"""
-        val body = RequestBody.create(MediaType.get("application/json"), json)
-        val request = Request.Builder()
-            .url(BASE_URL + "device_commands?id=eq.$commandId")
-            .addHeader("apikey", API_KEY)
-            .addHeader("Authorization", "Bearer $API_KEY")
-            .addHeader("Content-Type", "application/json")
-            .patch(body)
-            .build()
-        try {
-            val response = client.newCall(request).execute()
-            response.isSuccessful
-        } catch (e: IOException) {
-            false
-        }
-    }
 package com.devicecontrolkiosk.data
 
-import okhttp3.*
+import com.squareup.moshi.Json
 import com.squareup.moshi.Moshi
+import com.squareup.moshi.Types
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
+import java.time.Instant
 
 object SupabaseApi {
     private const val BASE_URL = "https://kihyhoqbrkwbfudttevo.supabase.co/rest/v1/"
     private const val API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtpaHlob3Ficmt3YmZ1ZHR0ZXZvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MTU1NTUwMjcsImV4cCI6MjAzMTEzMTAyN30.XtBTlSiqhsuUIKmhAMEyxofV-dRst7240n912m4O4Us"
+    private val jsonMediaType = "application/json".toMediaType()
     private val client = OkHttpClient()
     private val moshi = Moshi.Builder().add(KotlinJsonAdapterFactory()).build()
 
     suspend fun registerDevice(deviceId: String, unitName: String?): Boolean = withContext(Dispatchers.IO) {
-        val json = """{"device_id":"$deviceId","unit_name":${unitName?.let { "\"$it\"" } ?: "null" }}"""
-        val body = RequestBody.create(MediaType.get("application/json"), json)
+        val json = """{"device_id":"$deviceId","unit_name":${unitName?.let { "\"$it\"" } ?: "null"}}"""
         val request = Request.Builder()
-            .url(BASE_URL + "devices")
+            .url("${BASE_URL}devices")
             .addHeader("apikey", API_KEY)
             .addHeader("Authorization", "Bearer $API_KEY")
             .addHeader("Content-Type", "application/json")
-            .post(body)
+            .post(json.toRequestBody(jsonMediaType))
             .build()
+
         try {
-            val response = client.newCall(request).execute()
-            response.isSuccessful
-        } catch (e: IOException) {
+            client.newCall(request).execute().use { response ->
+                response.isSuccessful
+            }
+        } catch (_: IOException) {
             false
         }
     }
 
     suspend fun pollCommands(deviceId: String): List<DeviceCommand> = withContext(Dispatchers.IO) {
-        val url = BASE_URL + "device_commands?device_id=eq.$deviceId&executed=is.false&order=created_at.desc"
         val request = Request.Builder()
-            .url(url)
+            .url("${BASE_URL}device_commands?device_id=eq.$deviceId&executed=is.false&order=created_at.desc")
             .addHeader("apikey", API_KEY)
             .addHeader("Authorization", "Bearer $API_KEY")
             .get()
             .build()
+
         try {
-            val response = client.newCall(request).execute()
-            if (response.isSuccessful) {
-                val adapter = moshi.adapter<List<DeviceCommand>>(Types.newParameterizedType(List::class.java, DeviceCommand::class.java))
-                response.body()?.string()?.let { adapter.fromJson(it) } ?: emptyList()
-            } else {
-                emptyList()
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    return@withContext emptyList()
+                }
+
+                val adapter = moshi.adapter<List<DeviceCommand>>(
+                    Types.newParameterizedType(List::class.java, DeviceCommand::class.java)
+                )
+                response.body.string().let { adapter.fromJson(it) ?: emptyList() }
             }
-        } catch (e: IOException) {
+        } catch (_: IOException) {
             emptyList()
         }
     }
-}
 
-// Data class para comandos
-import com.squareup.moshi.Json
+    suspend fun markCommandExecuted(commandId: String): Boolean = withContext(Dispatchers.IO) {
+        val json = """{"executed":true,"executed_at":"${Instant.now()}"}"""
+        val request = Request.Builder()
+            .url("${BASE_URL}device_commands?id=eq.$commandId")
+            .addHeader("apikey", API_KEY)
+            .addHeader("Authorization", "Bearer $API_KEY")
+            .addHeader("Content-Type", "application/json")
+            .patch(json.toRequestBody(jsonMediaType))
+            .build()
+
+        try {
+            client.newCall(request).execute().use { response ->
+                response.isSuccessful
+            }
+        } catch (_: IOException) {
+            false
+        }
+    }
+}
 
 data class DeviceCommand(
     @Json(name = "id") val id: String,
