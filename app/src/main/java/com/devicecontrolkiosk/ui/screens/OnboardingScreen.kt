@@ -1,22 +1,34 @@
 package com.devicecontrolkiosk.ui.screens
 
-import androidx.compose.foundation.layout.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import com.devicecontrolkiosk.data.SupabaseApi
-import java.util.UUID
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
+import com.devicecontrolkiosk.data.SupabaseApi
+import kotlinx.coroutines.launch
+import java.util.UUID
 
 @Composable
 fun OnboardingScreen(navController: NavController) {
-    val deviceName = remember { mutableStateOf(TextFieldValue()) }
+    val unitEmail = remember { mutableStateOf(TextFieldValue()) }
     val isLoading = remember { mutableStateOf(false) }
     val errorMsg = remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
@@ -30,31 +42,44 @@ fun OnboardingScreen(navController: NavController) {
         Text("Registrar Dispositivo", style = MaterialTheme.typography.headlineMedium)
         Spacer(modifier = Modifier.height(24.dp))
         OutlinedTextField(
-            value = deviceName.value,
-            onValueChange = { deviceName.value = it },
-            label = { Text("Nome da Unidade") },
+            value = unitEmail.value,
+            onValueChange = { unitEmail.value = it },
+            label = { Text("E-mail da unidade") },
+            supportingText = { Text("Se esse e-mail ja existir, o cadastro atual sera sobrescrito.") },
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
             enabled = !isLoading.value
         )
         Spacer(modifier = Modifier.height(24.dp))
-        Button(onClick = {
-            isLoading.value = true
-            errorMsg.value = null
-            val uuid = UUID.randomUUID().toString()
-            scope.launch {
-                val success = SupabaseApi.registerDevice(uuid, deviceName.value.text.ifBlank { null })
-                isLoading.value = false
-                if (success) {
-                    // Salva device_id para uso pelo serviço
-                    val prefs = context.getSharedPreferences("device_prefs", android.content.Context.MODE_PRIVATE)
-                    prefs.edit().putString("device_id", uuid).apply()
-                    navController.navigate("status") {
-                        popUpTo("onboarding") { inclusive = true }
-                    }
-                } else {
-                    errorMsg.value = "Erro ao registrar. Tente novamente."
+        Button(
+            onClick = {
+                val normalizedEmail = unitEmail.value.text.trim().lowercase()
+                if (!android.util.Patterns.EMAIL_ADDRESS.matcher(normalizedEmail).matches()) {
+                    errorMsg.value = "Informe um e-mail valido da unidade."
+                    return@Button
                 }
-            }
-        }, enabled = !isLoading.value) {
+
+                isLoading.value = true
+                errorMsg.value = null
+                val uuid = UUID.randomUUID().toString()
+                scope.launch {
+                    val success = SupabaseApi.registerDevice(uuid, normalizedEmail)
+                    isLoading.value = false
+                    if (success) {
+                        val prefs = context.getSharedPreferences("device_prefs", android.content.Context.MODE_PRIVATE)
+                        prefs.edit()
+                            .putString("device_id", uuid)
+                            .putString("unit_email", normalizedEmail)
+                            .apply()
+                        navController.navigate("status") {
+                            popUpTo("onboarding") { inclusive = true }
+                        }
+                    } else {
+                        errorMsg.value = "Erro ao registrar ou atualizar a unidade."
+                    }
+                }
+            },
+            enabled = !isLoading.value
+        ) {
             if (isLoading.value) {
                 CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
             } else {

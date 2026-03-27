@@ -11,6 +11,8 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
 import java.time.Instant
 
 object SupabaseApi {
@@ -20,14 +22,32 @@ object SupabaseApi {
     private val client = OkHttpClient()
     private val moshi = Moshi.Builder().add(KotlinJsonAdapterFactory()).build()
 
-    suspend fun registerDevice(deviceId: String, unitName: String?): Boolean = withContext(Dispatchers.IO) {
-        val json = """{"device_id":"$deviceId","unit_name":${unitName?.let { "\"$it\"" } ?: "null"}}"""
+    suspend fun registerDevice(deviceId: String, unitEmail: String): Boolean = withContext(Dispatchers.IO) {
+        val normalizedEmail = unitEmail.trim().lowercase()
+        if (normalizedEmail.isBlank()) {
+            return@withContext false
+        }
+
+        val json = """{"device_id":"$deviceId","unit_name":"$normalizedEmail"}"""
+        val existingDevice = findDeviceByUnitEmail(normalizedEmail)
         val request = Request.Builder()
-            .url("${BASE_URL}devices")
+            .url(
+                if (existingDevice == null) {
+                    "${BASE_URL}devices"
+                } else {
+                    "${BASE_URL}devices?id=eq.${existingDevice.id}"
+                }
+            )
             .addHeader("apikey", API_KEY)
             .addHeader("Authorization", "Bearer $API_KEY")
             .addHeader("Content-Type", "application/json")
-            .post(json.toRequestBody(jsonMediaType))
+            .apply {
+                if (existingDevice == null) {
+                    post(json.toRequestBody(jsonMediaType))
+                } else {
+                    patch(json.toRequestBody(jsonMediaType))
+                }
+            }
             .build()
 
         try {
@@ -82,6 +102,32 @@ object SupabaseApi {
             false
         }
     }
+
+    private fun findDeviceByUnitEmail(unitEmail: String): RegisteredDevice? {
+        val encodedEmail = URLEncoder.encode(unitEmail, StandardCharsets.UTF_8.toString()).replace("+", "%20")
+        val request = Request.Builder()
+            .url("${BASE_URL}devices?select=id,device_id,unit_name&unit_name=eq.$encodedEmail&limit=1")
+            .addHeader("apikey", API_KEY)
+            .addHeader("Authorization", "Bearer $API_KEY")
+            .get()
+            .build()
+
+        return try {
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    return null
+                }
+
+                val payload = response.body?.string() ?: return null
+                val adapter = moshi.adapter<List<RegisteredDevice>>(
+                    Types.newParameterizedType(List::class.java, RegisteredDevice::class.java)
+                )
+                adapter.fromJson(payload)?.firstOrNull()
+            }
+        } catch (_: IOException) {
+            null
+        }
+    }
 }
 
 data class DeviceCommand(
@@ -91,4 +137,10 @@ data class DeviceCommand(
     @Json(name = "executed") val executed: Boolean?,
     @Json(name = "executed_at") val executedAt: String?,
     @Json(name = "created_at") val createdAt: String?
+)
+
+data class RegisteredDevice(
+    @Json(name = "id") val id: String,
+    @Json(name = "device_id") val deviceId: String?,
+    @Json(name = "unit_name") val unitName: String?
 )
