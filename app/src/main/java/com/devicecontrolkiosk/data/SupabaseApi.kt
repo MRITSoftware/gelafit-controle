@@ -56,7 +56,8 @@ object SupabaseApi {
                 val adapter = moshi.adapter<List<DeviceCommand>>(
                     Types.newParameterizedType(List::class.java, DeviceCommand::class.java)
                 )
-                response.body.string().let { adapter.fromJson(it) ?: emptyList() }
+                val payload = response.body?.string() ?: return@withContext emptyList()
+                adapter.fromJson(payload) ?: emptyList()
             }
         } catch (_: IOException) {
             emptyList()
