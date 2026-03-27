@@ -1,0 +1,6 @@
+- [x] Projeto Android inicial criado com Jetpack Compose, Material 3, serviço background e integração Supabase (estrutura base).
+- [ ] Customizar telas e lógica conforme requisitos do usuário.
+- [ ] Implementar integração REST com Supabase para registro e polling de comandos.
+- [ ] Implementar lógica de controle remoto dos apps e modo quiosque.
+- [ ] Garantir layout profissional e responsivo.
+- [ ] Documentar no README.md.
