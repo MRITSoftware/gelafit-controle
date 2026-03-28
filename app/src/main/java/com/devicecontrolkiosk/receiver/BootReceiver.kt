@@ -3,12 +3,16 @@ package com.devicecontrolkiosk.receiver
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import androidx.core.content.ContextCompat
 import com.devicecontrolkiosk.service.CommandService
 
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action == Intent.ACTION_BOOT_COMPLETED) {
-            context.startForegroundService(Intent(context, CommandService::class.java))
+            ContextCompat.startForegroundService(
+                context,
+                Intent(context, CommandService::class.java).putExtra(CommandService.EXTRA_TRIGGER_LAUNCH, true)
+            )
         }
     }
 }

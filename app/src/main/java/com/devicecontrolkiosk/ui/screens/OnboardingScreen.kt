@@ -22,6 +22,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
+import com.devicecontrolkiosk.data.DeviceConfigStore
 import com.devicecontrolkiosk.data.SupabaseApi
 import kotlinx.coroutines.launch
 import java.util.UUID
@@ -65,11 +66,7 @@ fun OnboardingScreen(navController: NavController) {
                     val success = SupabaseApi.registerDevice(uuid, normalizedEmail)
                     isLoading.value = false
                     if (success) {
-                        val prefs = context.getSharedPreferences("device_prefs", android.content.Context.MODE_PRIVATE)
-                        prefs.edit()
-                            .putString("device_id", uuid)
-                            .putString("unit_email", normalizedEmail)
-                            .apply()
+                        DeviceConfigStore.saveRegistration(context, uuid, normalizedEmail)
                         navController.navigate("status") {
                             popUpTo("onboarding") { inclusive = true }
                         }
