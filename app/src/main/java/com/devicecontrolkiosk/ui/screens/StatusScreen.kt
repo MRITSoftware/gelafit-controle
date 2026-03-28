@@ -121,7 +121,7 @@ fun StatusScreen(navController: NavController) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
+                                horizontalArrangement = Arrangement.Start
                             ) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     RadioButton(
@@ -132,18 +132,6 @@ fun StatusScreen(navController: NavController) {
                                         }
                                     )
                                     Text("Definir como app de quiosque")
-                                }
-                                Button(
-                                    onClick = {
-                                        statusMessage = "Reiniciando ${app.label}."
-                                        ContextCompat.startForegroundService(
-                                            context,
-                                            Intent(context, CommandService::class.java)
-                                                .putExtra(CommandService.EXTRA_RESTART_PACKAGE, app.packageName)
-                                        )
-                                    }
-                                ) {
-                                    Text("Reiniciar")
                                 }
                             }
                         }

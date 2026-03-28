@@ -30,13 +30,6 @@ class CommandService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIFICATION_ID, buildNotification("Controle remoto ativo"))
 
-        val requestedRestartPackage = intent?.getStringExtra(EXTRA_RESTART_PACKAGE)
-        if (!requestedRestartPackage.isNullOrBlank()) {
-            serviceScope.launch {
-                restartApp(requestedRestartPackage, preserveKiosk = true)
-            }
-        }
-
         if (intent?.getBooleanExtra(EXTRA_TRIGGER_LAUNCH, false) == true) {
             serviceScope.launch {
                 launchConfiguredApps()
@@ -81,8 +74,15 @@ class CommandService : Service() {
             val json = JSONObject(commandPayload)
             val type = json.getString("type")
             val payload = json.optJSONObject("payload")
+            val config = DeviceConfigStore.getConfig(this)
             when (type) {
                 "restart_app" -> payload?.optString("package")?.takeIf { it.isNotBlank() }?.let {
+                    serviceScope.launch { restartApp(it, preserveKiosk = true) }
+                }
+                "restart_first_app" -> config.controlledPackages.firstOrNull()?.let {
+                    serviceScope.launch { restartApp(it, preserveKiosk = true) }
+                }
+                "restart_second_app" -> config.controlledPackages.getOrNull(1)?.let {
                     serviceScope.launch { restartApp(it, preserveKiosk = true) }
                 }
                 "restart_controlled_apps" -> serviceScope.launch { launchConfiguredApps(restartFirst = true) }
@@ -218,7 +218,6 @@ class CommandService : Service() {
 
     companion object {
         const val EXTRA_TRIGGER_LAUNCH = "extra_trigger_launch"
-        const val EXTRA_RESTART_PACKAGE = "extra_restart_package"
         private const val CHANNEL_ID = "device_control_service"
         private const val NOTIFICATION_ID = 1001
         private const val APP_LAUNCH_DELAY_MS = 2_000L
