@@ -30,6 +30,13 @@ class CommandService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIFICATION_ID, buildNotification("Controle remoto ativo"))
 
+        val requestedRestartPackage = intent?.getStringExtra(EXTRA_RESTART_PACKAGE)
+        if (!requestedRestartPackage.isNullOrBlank()) {
+            serviceScope.launch {
+                restartApp(requestedRestartPackage, preserveKiosk = true)
+            }
+        }
+
         if (intent?.getBooleanExtra(EXTRA_TRIGGER_LAUNCH, false) == true) {
             serviceScope.launch {
                 launchConfiguredApps()
@@ -75,7 +82,9 @@ class CommandService : Service() {
             val type = json.getString("type")
             val payload = json.optJSONObject("payload")
             when (type) {
-                "restart_app" -> payload?.optString("package")?.takeIf { it.isNotBlank() }?.let(::restartApp)
+                "restart_app" -> payload?.optString("package")?.takeIf { it.isNotBlank() }?.let {
+                    serviceScope.launch { restartApp(it, preserveKiosk = true) }
+                }
                 "restart_controlled_apps" -> serviceScope.launch { launchConfiguredApps(restartFirst = true) }
                 "set_kiosk" -> payload?.optString("package")?.takeIf { it.isNotBlank() }?.let(::setKioskMode)
                 "restart_device" -> restartDevice()
@@ -104,28 +113,46 @@ class CommandService : Service() {
             return
         }
 
-        val backgroundApps = config.controlledPackages.filterNot { it == config.kioskPackage }
+        val firstApp = config.controlledPackages.firstOrNull()
+        val secondApp = config.controlledPackages.getOrNull(1)
         if (restartFirst) {
-            config.controlledPackages.forEach(::restartApp)
-            delay(1500)
+            config.controlledPackages.forEach { packageName ->
+                restartApp(packageName, preserveKiosk = false)
+                delay(RESTART_DELAY_MS)
+            }
+            return
         }
 
-        backgroundApps.forEach { packageName ->
-            openApp(packageName)
-            delay(1500)
+        firstApp?.let {
+            openApp(it)
         }
 
-        config.kioskPackage?.let {
+        val delayedTarget = config.kioskPackage ?: secondApp
+        val immediateSecond = secondApp?.takeIf { it != delayedTarget }
+
+        if (immediateSecond != null) {
+            delay(APP_LAUNCH_DELAY_MS)
+            openApp(immediateSecond)
+        }
+
+        delayedTarget?.let {
+            delay(KIOSK_LAUNCH_DELAY_MS)
             openApp(it)
         }
     }
 
-    private fun restartApp(packageName: String) {
+    private suspend fun restartApp(packageName: String, preserveKiosk: Boolean) {
         Log.i("CommandService", "Reiniciando app: $packageName")
         try {
             val am = getSystemService(ACTIVITY_SERVICE) as ActivityManager
             am.killBackgroundProcesses(packageName)
+            delay(RESTART_DELAY_MS)
             openApp(packageName)
+            val kioskPackage = DeviceConfigStore.getConfig(this).kioskPackage
+            if (preserveKiosk && kioskPackage != null && kioskPackage != packageName) {
+                delay(KIOSK_RESTORE_DELAY_MS)
+                openApp(kioskPackage)
+            }
         } catch (e: Exception) {
             Log.e("CommandService", "Erro ao reiniciar app: ${e.message}")
         }
@@ -191,7 +218,12 @@ class CommandService : Service() {
 
     companion object {
         const val EXTRA_TRIGGER_LAUNCH = "extra_trigger_launch"
+        const val EXTRA_RESTART_PACKAGE = "extra_restart_package"
         private const val CHANNEL_ID = "device_control_service"
         private const val NOTIFICATION_ID = 1001
+        private const val APP_LAUNCH_DELAY_MS = 2_000L
+        private const val KIOSK_LAUNCH_DELAY_MS = 10_000L
+        private const val KIOSK_RESTORE_DELAY_MS = 3_000L
+        private const val RESTART_DELAY_MS = 1_500L
     }
 }

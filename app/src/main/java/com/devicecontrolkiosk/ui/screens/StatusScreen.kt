@@ -5,10 +5,8 @@ import android.content.pm.PackageManager
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -42,7 +40,7 @@ fun StatusScreen(navController: NavController) {
     val context = navController.context
     val config = remember { DeviceConfigStore.getConfig(context) }
     var installedApps by remember { mutableStateOf(emptyList<InstalledApp>()) }
-    var selectedPackages by remember { mutableStateOf(config.controlledPackages.toSet()) }
+    var selectedPackages by remember { mutableStateOf(config.controlledPackages) }
     var kioskPackage by remember { mutableStateOf(config.kioskPackage) }
     var statusMessage by remember { mutableStateOf("Monitorando comandos remotos") }
     var selectionError by remember { mutableStateOf<String?>(null) }
@@ -73,6 +71,9 @@ fun StatusScreen(navController: NavController) {
                     "Escolhidos: ${selectedPackages.size}/2. O app marcado como quiosque sera aberto por ultimo no boot.",
                     style = MaterialTheme.typography.bodyMedium
                 )
+                if (selectedPackages.isNotEmpty()) {
+                    Text("Ordem atual: ${selectedPackages.joinToString(" -> ")}", style = MaterialTheme.typography.bodySmall)
+                }
                 selectionError?.let {
                     Text(it, color = MaterialTheme.colorScheme.error)
                 }
@@ -104,7 +105,7 @@ fun StatusScreen(navController: NavController) {
                                     selectionError = null
                                     selectedPackages = when {
                                         checked && selectedPackages.size < 2 -> selectedPackages + app.packageName
-                                        !checked -> selectedPackages - app.packageName
+                                        !checked -> selectedPackages.filterNot { it == app.packageName }
                                         else -> {
                                             selectionError = "Voce pode controlar apenas 2 apps."
                                             selectedPackages
@@ -117,16 +118,40 @@ fun StatusScreen(navController: NavController) {
                             )
                         }
                         if (isSelected) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                RadioButton(
-                                    selected = kioskPackage == app.packageName,
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    RadioButton(
+                                        selected = kioskPackage == app.packageName,
+                                        onClick = {
+                                            kioskPackage = app.packageName
+                                            selectionError = null
+                                        }
+                                    )
+                                    Text("Definir como app de quiosque")
+                                }
+                                Button(
                                     onClick = {
-                                        kioskPackage = app.packageName
-                                        selectionError = null
+                                        statusMessage = "Reiniciando ${app.label}."
+                                        ContextCompat.startForegroundService(
+                                            context,
+                                            Intent(context, CommandService::class.java)
+                                                .putExtra(CommandService.EXTRA_RESTART_PACKAGE, app.packageName)
+                                        )
                                     }
-                                )
-                                Text("Definir como app de quiosque")
+                                ) {
+                                    Text("Reiniciar")
+                                }
                             }
+                        }
+                        if (isSelected) {
+                            Text(
+                                "Posicao: ${selectedPackages.indexOf(app.packageName) + 1}",
+                                style = MaterialTheme.typography.bodySmall
+                            )
                         }
                     }
                 }

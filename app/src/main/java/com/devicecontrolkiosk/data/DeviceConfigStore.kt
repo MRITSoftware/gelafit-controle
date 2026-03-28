@@ -6,7 +6,8 @@ object DeviceConfigStore {
     private const val PREFS_NAME = "device_prefs"
     private const val KEY_DEVICE_ID = "device_id"
     private const val KEY_UNIT_EMAIL = "unit_email"
-    private const val KEY_CONTROLLED_APPS = "controlled_apps"
+    private const val KEY_PRIMARY_APP = "primary_app"
+    private const val KEY_SECONDARY_APP = "secondary_app"
     private const val KEY_KIOSK_PACKAGE = "kiosk_package"
 
     data class AppSelection(
@@ -18,7 +19,10 @@ object DeviceConfigStore {
 
     fun getConfig(context: Context): AppSelection {
         val prefs = prefs(context)
-        val controlled = prefs.getStringSet(KEY_CONTROLLED_APPS, emptySet()).orEmpty().toList().sorted()
+        val controlled = listOfNotNull(
+            prefs.getString(KEY_PRIMARY_APP, null),
+            prefs.getString(KEY_SECONDARY_APP, null)
+        ).distinct()
         return AppSelection(
             deviceId = prefs.getString(KEY_DEVICE_ID, null),
             unitEmail = prefs.getString(KEY_UNIT_EMAIL, null),
@@ -38,7 +42,8 @@ object DeviceConfigStore {
         val normalizedPackages = controlledPackages.distinct().take(2)
         val normalizedKiosk = kioskPackage?.takeIf { normalizedPackages.contains(it) }
         prefs(context).edit()
-            .putStringSet(KEY_CONTROLLED_APPS, normalizedPackages.toSet())
+            .putString(KEY_PRIMARY_APP, normalizedPackages.getOrNull(0))
+            .putString(KEY_SECONDARY_APP, normalizedPackages.getOrNull(1))
             .putString(KEY_KIOSK_PACKAGE, normalizedKiosk)
             .apply()
     }
