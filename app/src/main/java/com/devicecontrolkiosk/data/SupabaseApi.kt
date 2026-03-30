@@ -18,6 +18,7 @@ import java.time.Instant
 object SupabaseApi {
     private const val BASE_URL = "https://kihyhoqbrkwbfudttevo.supabase.co/rest/v1/"
     private const val API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtpaHlob3Ficmt3YmZ1ZHR0ZXZvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MTU1NTUwMjcsImV4cCI6MjAzMTEzMTAyN30.XtBTlSiqhsuUIKmhAMEyxofV-dRst7240n912m4O4Us"
+    const val KIOSK_MODE_TABLE = "device_kiosk_modes"
     private val jsonMediaType = "application/json".toMediaType()
     private val client = OkHttpClient()
     private val moshi = Moshi.Builder().add(KotlinJsonAdapterFactory()).build()
@@ -103,8 +104,86 @@ object SupabaseApi {
         }
     }
 
+    suspend fun fetchKioskPackage(deviceId: String, allowedPackages: List<String>): String? = withContext(Dispatchers.IO) {
+        if (deviceId.isBlank() || allowedPackages.isEmpty()) {
+            return@withContext null
+        }
+
+        val request = Request.Builder()
+            .url("${BASE_URL}${KIOSK_MODE_TABLE}?select=package_name&device_id=eq.${encodeValue(deviceId)}&is_kiosk=eq.true&limit=1")
+            .addHeader("apikey", API_KEY)
+            .addHeader("Authorization", "Bearer $API_KEY")
+            .get()
+            .build()
+
+        try {
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    return@withContext null
+                }
+
+                val payload = response.body?.string() ?: return@withContext null
+                val adapter = moshi.adapter<List<DeviceKioskMode>>(
+                    Types.newParameterizedType(List::class.java, DeviceKioskMode::class.java)
+                )
+                val mode = adapter.fromJson(payload)?.firstOrNull()
+                mode?.packageName?.takeIf { allowedPackages.contains(it) }
+            }
+        } catch (_: IOException) {
+            null
+        }
+    }
+
+    suspend fun syncKioskModes(deviceId: String, controlledPackages: List<String>, kioskPackage: String?): Boolean =
+        withContext(Dispatchers.IO) {
+            val normalizedPackages = controlledPackages.distinct().take(2)
+            if (deviceId.isBlank() || normalizedPackages.isEmpty()) {
+                return@withContext false
+            }
+
+            val normalizedKiosk = kioskPackage?.takeIf { normalizedPackages.contains(it) }
+            val json = buildString {
+                append("[")
+                normalizedPackages.forEachIndexed { index, packageName ->
+                    if (index > 0) append(",")
+                    append(
+                        """{"device_id":"$deviceId","package_name":"$packageName","is_kiosk":${packageName == normalizedKiosk},"updated_at":"${Instant.now()}"}"""
+                    )
+                }
+                append("]")
+            }
+
+            val deleteRequest = Request.Builder()
+                .url("${BASE_URL}${KIOSK_MODE_TABLE}?device_id=eq.${encodeValue(deviceId)}")
+                .addHeader("apikey", API_KEY)
+                .addHeader("Authorization", "Bearer $API_KEY")
+                .delete()
+                .build()
+
+            val insertRequest = Request.Builder()
+                .url("${BASE_URL}${KIOSK_MODE_TABLE}")
+                .addHeader("apikey", API_KEY)
+                .addHeader("Authorization", "Bearer $API_KEY")
+                .addHeader("Content-Type", "application/json")
+                .post(json.toRequestBody(jsonMediaType))
+                .build()
+
+            try {
+                client.newCall(deleteRequest).execute().use { deleteResponse ->
+                    if (!deleteResponse.isSuccessful) {
+                        return@withContext false
+                    }
+                }
+                client.newCall(insertRequest).execute().use { insertResponse ->
+                    insertResponse.isSuccessful
+                }
+            } catch (_: IOException) {
+                false
+            }
+        }
+
     private fun findDeviceByUnitEmail(unitEmail: String): RegisteredDevice? {
-        val encodedEmail = URLEncoder.encode(unitEmail, StandardCharsets.UTF_8.toString()).replace("+", "%20")
+        val encodedEmail = encodeValue(unitEmail)
         val request = Request.Builder()
             .url("${BASE_URL}devices?select=id,device_id,unit_name&unit_name=eq.$encodedEmail&limit=1")
             .addHeader("apikey", API_KEY)
@@ -128,6 +207,10 @@ object SupabaseApi {
             null
         }
     }
+
+    private fun encodeValue(value: String): String {
+        return URLEncoder.encode(value, StandardCharsets.UTF_8.toString()).replace("+", "%20")
+    }
 }
 
 data class DeviceCommand(
@@ -143,4 +226,10 @@ data class RegisteredDevice(
     @Json(name = "id") val id: String,
     @Json(name = "device_id") val deviceId: String?,
     @Json(name = "unit_name") val unitName: String?
+)
+
+data class DeviceKioskMode(
+    @Json(name = "device_id") val deviceId: String?,
+    @Json(name = "package_name") val packageName: String?,
+    @Json(name = "is_kiosk") val isKiosk: Boolean?
 )

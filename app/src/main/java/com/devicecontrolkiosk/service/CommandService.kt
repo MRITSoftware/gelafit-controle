@@ -95,6 +95,7 @@ class CommandService : Service() {
                         val appList = (0 until apps.length()).map { apps.getString(it) }
                         DeviceConfigStore.saveAppSelection(this, appList, kioskPackage)
                         serviceScope.launch {
+                            syncRemoteKioskSelection(appList, kioskPackage)
                             launchConfiguredApps()
                         }
                     }
@@ -127,7 +128,8 @@ class CommandService : Service() {
             openApp(it)
         }
 
-        val delayedTarget = config.kioskPackage ?: secondApp
+        val kioskPackage = resolveKioskPackage(config)
+        val delayedTarget = kioskPackage ?: secondApp
         val immediateSecond = secondApp?.takeIf { it != delayedTarget }
 
         if (immediateSecond != null) {
@@ -148,7 +150,7 @@ class CommandService : Service() {
             am.killBackgroundProcesses(packageName)
             delay(RESTART_DELAY_MS)
             openApp(packageName)
-            val kioskPackage = DeviceConfigStore.getConfig(this).kioskPackage
+            val kioskPackage = resolveKioskPackage(DeviceConfigStore.getConfig(this))
             if (preserveKiosk && kioskPackage != null && kioskPackage != packageName) {
                 delay(KIOSK_RESTORE_DELAY_MS)
                 openApp(kioskPackage)
@@ -161,8 +163,32 @@ class CommandService : Service() {
     private fun setKioskMode(packageName: String) {
         val config = DeviceConfigStore.getConfig(this)
         DeviceConfigStore.saveAppSelection(this, config.controlledPackages, packageName)
+        serviceScope.launch {
+            syncRemoteKioskSelection(config.controlledPackages, packageName)
+        }
         Log.i("CommandService", "App de quiosque definido: $packageName")
         openApp(packageName)
+    }
+
+    private suspend fun resolveKioskPackage(config: DeviceConfigStore.AppSelection): String? {
+        val remoteKiosk = config.deviceId?.let { deviceId ->
+            SupabaseApi.fetchKioskPackage(deviceId, config.controlledPackages)
+        }
+        if (remoteKiosk != null && remoteKiosk != config.kioskPackage) {
+            DeviceConfigStore.saveAppSelection(this, config.controlledPackages, remoteKiosk)
+        }
+        return remoteKiosk ?: config.kioskPackage
+    }
+
+    private suspend fun syncRemoteKioskSelection(controlledPackages: List<String>, kioskPackage: String?) {
+        val deviceId = DeviceConfigStore.getConfig(this).deviceId
+        if (deviceId.isNullOrBlank()) {
+            return
+        }
+        val synced = SupabaseApi.syncKioskModes(deviceId, controlledPackages, kioskPackage)
+        if (!synced) {
+            Log.e("CommandService", "Falha ao sincronizar tabela remota de kiosk.")
+        }
     }
 
     private fun openApp(packageName: String) {
