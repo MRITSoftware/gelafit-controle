@@ -179,22 +179,12 @@ class CommandService : Service() {
             return
         }
 
-        config.controlledPackages.firstOrNull()?.let {
-            bringPackageToFront(it, enableKioskLock = false)
-        }
-
-        val secondApp = config.controlledPackages.getOrNull(1)
-        val delayedTarget = kioskPackage ?: secondApp
-        val immediateSecond = secondApp?.takeIf { it != delayedTarget }
-
-        if (immediateSecond != null) {
-            delay(APP_LAUNCH_DELAY_MS)
-            bringPackageToFront(immediateSecond, enableKioskLock = false)
-        }
-
-        delayedTarget?.let {
-            delay(KIOSK_LAUNCH_DELAY_MS)
-            bringPackageToFront(it, enableKioskLock = it == kioskPackage)
+        val orderedPackages = buildLaunchOrder(config.controlledPackages, kioskPackage)
+        orderedPackages.forEachIndexed { index, packageName ->
+            if (index > 0) {
+                delay(APP_SWITCH_DELAY_MS)
+            }
+            bringPackageToFront(packageName, enableKioskLock = packageName == kioskPackage)
         }
     }
 
@@ -216,6 +206,16 @@ class CommandService : Service() {
             }
         } catch (e: Exception) {
             Log.e("CommandService", "Erro ao reiniciar app: ${e.message}")
+        }
+    }
+
+    private fun buildLaunchOrder(controlledPackages: List<String>, kioskPackage: String?): List<String> {
+        val normalized = controlledPackages.distinct().take(2)
+        val nonKiosk = normalized.filter { it != kioskPackage }
+        return if (kioskPackage != null && normalized.contains(kioskPackage)) {
+            nonKiosk + kioskPackage
+        } else {
+            normalized
         }
     }
 
@@ -354,8 +354,7 @@ class CommandService : Service() {
         private const val NOTIFICATION_ID = 1001
         private const val POLLING_INTERVAL_MS = 10_000L
         private const val KIOSK_WATCHDOG_INTERVAL_MS = 1_500L
-        private const val APP_LAUNCH_DELAY_MS = 2_000L
-        private const val KIOSK_LAUNCH_DELAY_MS = 10_000L
+        private const val APP_SWITCH_DELAY_MS = 1_200L
         private const val KIOSK_RESTORE_DELAY_MS = 3_000L
         private const val KIOSK_LAUNCH_GRACE_MS = 20_000L
         private const val KIOSK_RECOVERY_GRACE_MS = 4_000L
