@@ -24,6 +24,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -32,11 +33,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
-import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.navigation.NavController
 import com.devicecontrolkiosk.data.DeviceConfigStore
 import com.devicecontrolkiosk.data.SupabaseApi
@@ -86,7 +87,40 @@ fun StatusScreen(navController: NavController) {
         deviceOwnerActive = KioskManager.isDeviceOwner(context)
     }
 
-    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+    val pendingAccessActions = buildList {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !notificationsGranted) {
+            add(AccessAction(
+                label = "Pedir notificacao",
+                onClick = { notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) }
+            ))
+        }
+        if (!ignoringBatteryOptimizations) {
+            add(AccessAction(
+                label = "Liberar bateria",
+                onClick = {
+                    val intent = Intent(
+                        Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                        Uri.parse("package:${context.packageName}")
+                    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    context.startActivity(intent)
+                }
+            ))
+        }
+        if (!usageAccessGranted) {
+            add(AccessAction(
+                label = "Liberar uso",
+                onClick = { KioskManager.openUsageAccessSettings(context) }
+            ))
+        }
+        if (!deviceAdminActive) {
+            add(AccessAction(
+                label = "Ativar admin",
+                onClick = { context.startActivity(KioskManager.buildAddDeviceAdminIntent(context)) }
+            ))
+        }
+    }
+
+    DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 refreshAccessState()
@@ -136,44 +170,24 @@ fun StatusScreen(navController: NavController) {
                     },
                     style = MaterialTheme.typography.bodySmall
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(
-                        onClick = {
-                            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                        },
-                        enabled = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !notificationsGranted
-                    ) {
-                        Text("Pedir notificacao")
-                    }
-                    Button(
-                        onClick = {
-                            val intent = Intent(
-                                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                                Uri.parse("package:${context.packageName}")
-                            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            context.startActivity(intent)
-                        },
-                        enabled = !ignoringBatteryOptimizations
-                    ) {
-                        Text("Liberar bateria")
-                    }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(
-                        onClick = {
-                            KioskManager.openUsageAccessSettings(context)
-                        },
-                        enabled = !usageAccessGranted
-                    ) {
-                        Text("Liberar uso")
-                    }
-                    Button(
-                        onClick = {
-                            context.startActivity(KioskManager.buildAddDeviceAdminIntent(context))
-                        },
-                        enabled = !deviceAdminActive
-                    ) {
-                        Text("Ativar admin")
+                if (pendingAccessActions.isEmpty()) {
+                    Text(
+                        "Todos os acessos principais ja foram liberados.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                } else {
+                    Text(
+                        "Acoes pendentes: ${pendingAccessActions.joinToString { it.label }}",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    pendingAccessActions.forEach { action ->
+                        Button(
+                            onClick = action.onClick,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(action.label)
+                        }
                     }
                 }
             }
@@ -183,7 +197,7 @@ fun StatusScreen(navController: NavController) {
             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Selecione exatamente 2 apps", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    "Escolhidos: ${selectedPackages.size}/2. O app marcado como quiosque sera aberto por ultimo no boot, restaurado se sair do foco e a escolha sera espelhada no Supabase.",
+                    "Escolhidos: ${selectedPackages.size}/2. O app marcado como quiosque sera aberto por ultimo no boot e restaurado se sair do foco.",
                     style = MaterialTheme.typography.bodyMedium
                 )
                 if (selectedPackages.isNotEmpty()) {
@@ -195,56 +209,58 @@ fun StatusScreen(navController: NavController) {
             }
         }
 
-        if (selectedPackages.isNotEmpty()) {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Acoes rapidas", style = MaterialTheme.typography.titleMedium)
-                    selectedPackages.forEachIndexed { index, packageName ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text("App ${index + 1}: $packageName", modifier = Modifier.weight(1f))
+        LazyColumn(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            if (selectedPackages.isNotEmpty()) {
+                item(key = "quick_actions") {
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("Acoes rapidas", style = MaterialTheme.typography.titleMedium)
+                            selectedPackages.forEachIndexed { index, packageName ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("App ${index + 1}: $packageName", modifier = Modifier.weight(1f))
+                                    Button(
+                                        onClick = {
+                                            ContextCompat.startForegroundService(
+                                                context,
+                                                Intent(context, CommandService::class.java).apply {
+                                                    action = CommandService.ACTION_RESTART_PACKAGE
+                                                    putExtra(CommandService.EXTRA_PACKAGE_NAME, packageName)
+                                                }
+                                            )
+                                            statusMessage = "Reinicio solicitado para $packageName"
+                                        }
+                                    ) {
+                                        Text("Reiniciar")
+                                    }
+                                }
+                            }
                             Button(
                                 onClick = {
                                     ContextCompat.startForegroundService(
                                         context,
                                         Intent(context, CommandService::class.java).apply {
-                                            action = CommandService.ACTION_RESTART_PACKAGE
-                                            putExtra(CommandService.EXTRA_PACKAGE_NAME, packageName)
+                                            action = CommandService.ACTION_ENSURE_KIOSK
                                         }
                                     )
-                                    statusMessage = "Reinicio solicitado para $packageName"
-                                }
+                                    statusMessage = "Kiosk reforcado manualmente."
+                                },
+                                enabled = kioskPackage != null,
+                                modifier = Modifier.fillMaxWidth()
                             ) {
-                                Text("Reiniciar")
+                                Text("Ativar kiosk agora")
                             }
                         }
                     }
-                    Button(
-                        onClick = {
-                            ContextCompat.startForegroundService(
-                                context,
-                                Intent(context, CommandService::class.java).apply {
-                                    action = CommandService.ACTION_ENSURE_KIOSK
-                                }
-                            )
-                            statusMessage = "Kiosk reforcado manualmente."
-                        },
-                        enabled = kioskPackage != null,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("Ativar kiosk agora")
-                    }
                 }
             }
-        }
 
-        LazyColumn(
-            modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
             items(installedApps, key = { it.packageName }) { app ->
                 val isSelected = selectedPackages.contains(app.packageName)
                 val canSelect = isSelected || selectedPackages.size < 2
@@ -342,6 +358,11 @@ fun StatusScreen(navController: NavController) {
     }
 }
 
+private data class AccessAction(
+    val label: String,
+    val onClick: () -> Unit
+)
+
 private fun loadLaunchableApps(packageManager: PackageManager, currentPackage: String): List<InstalledApp> {
     val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
     return packageManager.queryIntentActivities(intent, 0)
@@ -366,4 +387,3 @@ private fun hasNotificationPermission(context: android.content.Context): Boolean
             Manifest.permission.POST_NOTIFICATIONS
         ) == PackageManager.PERMISSION_GRANTED
 }
-
