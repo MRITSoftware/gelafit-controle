@@ -10,9 +10,11 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.devicecontrolkiosk.R
 import com.devicecontrolkiosk.data.DeviceConfigStore
 import com.devicecontrolkiosk.data.SupabaseApi
+import com.devicecontrolkiosk.kiosk.KioskManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -26,9 +28,30 @@ import org.json.JSONObject
 class CommandService : Service() {
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var pollingJob: Job? = null
+    private var kioskWatchdogJob: Job? = null
+    @Volatile private var kioskGraceUntilMs: Long = 0L
+    @Volatile private var allowSelfRestart: Boolean = true
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(NOTIFICATION_ID, buildNotification("Controle remoto ativo"))
+        startForeground(NOTIFICATION_ID, buildNotification("Controle remoto e kiosk ativos"))
+        allowSelfRestart = true
+
+        when (intent?.action) {
+            ACTION_RESTART_PACKAGE -> {
+                intent.getStringExtra(EXTRA_PACKAGE_NAME)
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { packageName ->
+                        serviceScope.launch {
+                            restartApp(packageName, preserveKiosk = true)
+                        }
+                    }
+            }
+            ACTION_ENSURE_KIOSK -> {
+                serviceScope.launch {
+                    enforceKioskIfNeeded(force = true)
+                }
+            }
+        }
 
         if (intent?.getBooleanExtra(EXTRA_TRIGGER_LAUNCH, false) == true) {
             serviceScope.launch {
@@ -36,36 +59,61 @@ class CommandService : Service() {
             }
         }
 
-        if (pollingJob == null) {
-            pollingJob = serviceScope.launch {
-                val config = DeviceConfigStore.getConfig(this@CommandService)
-                val deviceId = config.deviceId
-                if (deviceId.isNullOrBlank()) {
-                    Log.e("CommandService", "Device ID nao encontrado. Servico nao pode iniciar polling.")
-                    stopSelf()
-                    return@launch
-                }
+        ensurePollingLoop()
+        ensureKioskWatchdogLoop()
+        return START_STICKY
+    }
 
-                while (isActive) {
-                    try {
-                        val commands = SupabaseApi.pollCommands(deviceId)
-                        for (cmd in commands) {
-                            processCommand(cmd.command)
-                            val marked = SupabaseApi.markCommandExecuted(cmd.id)
-                            if (marked) {
-                                Log.i("CommandService", "Comando ${cmd.id} marcado como executado.")
-                            } else {
-                                Log.e("CommandService", "Falha ao marcar comando ${cmd.id} como executado.")
-                            }
+    private fun ensurePollingLoop() {
+        if (pollingJob != null) {
+            return
+        }
+
+        pollingJob = serviceScope.launch {
+            val config = DeviceConfigStore.getConfig(this@CommandService)
+            val deviceId = config.deviceId
+            if (deviceId.isNullOrBlank()) {
+                Log.e("CommandService", "Device ID nao encontrado. Servico nao pode iniciar polling.")
+                allowSelfRestart = false
+                stopSelf()
+                return@launch
+            }
+
+            while (isActive) {
+                try {
+                    val commands = SupabaseApi.pollCommands(deviceId)
+                    for (cmd in commands) {
+                        processCommand(cmd.command)
+                        val marked = SupabaseApi.markCommandExecuted(cmd.id)
+                        if (marked) {
+                            Log.i("CommandService", "Comando ${cmd.id} marcado como executado.")
+                        } else {
+                            Log.e("CommandService", "Falha ao marcar comando ${cmd.id} como executado.")
                         }
-                    } catch (e: Exception) {
-                        Log.e("CommandService", "Erro no polling: ${e.message}")
                     }
-                    delay(10_000)
+                } catch (e: Exception) {
+                    Log.e("CommandService", "Erro no polling: ${e.message}")
                 }
+                delay(POLLING_INTERVAL_MS)
             }
         }
-        return START_STICKY
+    }
+
+    private fun ensureKioskWatchdogLoop() {
+        if (kioskWatchdogJob != null) {
+            return
+        }
+
+        kioskWatchdogJob = serviceScope.launch {
+            while (isActive) {
+                try {
+                    enforceKioskIfNeeded(force = false)
+                } catch (e: Exception) {
+                    Log.e("CommandService", "Erro no watchdog de kiosk: ${e.message}")
+                }
+                delay(KIOSK_WATCHDOG_INTERVAL_MS)
+            }
+        }
     }
 
     private fun processCommand(commandPayload: String) {
@@ -95,6 +143,7 @@ class CommandService : Service() {
                         val appList = (0 until apps.length()).map { apps.getString(it) }
                         DeviceConfigStore.saveAppSelection(this, appList, kioskPackage)
                         serviceScope.launch {
+                            KioskManager.syncLockTaskPackages(this@CommandService, appList)
                             syncRemoteKioskSelection(appList, kioskPackage)
                             launchConfiguredApps()
                         }
@@ -114,46 +163,56 @@ class CommandService : Service() {
             return
         }
 
-        val firstApp = config.controlledPackages.firstOrNull()
-        val secondApp = config.controlledPackages.getOrNull(1)
+        KioskManager.syncLockTaskPackages(this, config.controlledPackages)
+        val kioskPackage = resolveKioskPackage(config)
+        extendKioskGrace(KIOSK_LAUNCH_GRACE_MS)
+
         if (restartFirst) {
             config.controlledPackages.forEach { packageName ->
                 restartApp(packageName, preserveKiosk = false)
                 delay(RESTART_DELAY_MS)
             }
+            kioskPackage?.let {
+                delay(KIOSK_RESTORE_DELAY_MS)
+                bringPackageToFront(it, enableKioskLock = true)
+            }
             return
         }
 
-        firstApp?.let {
-            openApp(it)
+        config.controlledPackages.firstOrNull()?.let {
+            bringPackageToFront(it, enableKioskLock = false)
         }
 
-        val kioskPackage = resolveKioskPackage(config)
+        val secondApp = config.controlledPackages.getOrNull(1)
         val delayedTarget = kioskPackage ?: secondApp
         val immediateSecond = secondApp?.takeIf { it != delayedTarget }
 
         if (immediateSecond != null) {
             delay(APP_LAUNCH_DELAY_MS)
-            openApp(immediateSecond)
+            bringPackageToFront(immediateSecond, enableKioskLock = false)
         }
 
         delayedTarget?.let {
             delay(KIOSK_LAUNCH_DELAY_MS)
-            openApp(it)
+            bringPackageToFront(it, enableKioskLock = it == kioskPackage)
         }
     }
 
     private suspend fun restartApp(packageName: String, preserveKiosk: Boolean) {
         Log.i("CommandService", "Reiniciando app: $packageName")
         try {
+            extendKioskGrace(KIOSK_RECOVERY_GRACE_MS)
             val am = getSystemService(ACTIVITY_SERVICE) as ActivityManager
             am.killBackgroundProcesses(packageName)
             delay(RESTART_DELAY_MS)
-            openApp(packageName)
-            val kioskPackage = resolveKioskPackage(DeviceConfigStore.getConfig(this))
+
+            val config = DeviceConfigStore.getConfig(this)
+            val kioskPackage = resolveKioskPackage(config)
+            bringPackageToFront(packageName, enableKioskLock = packageName == kioskPackage)
+
             if (preserveKiosk && kioskPackage != null && kioskPackage != packageName) {
                 delay(KIOSK_RESTORE_DELAY_MS)
-                openApp(kioskPackage)
+                bringPackageToFront(kioskPackage, enableKioskLock = true)
             }
         } catch (e: Exception) {
             Log.e("CommandService", "Erro ao reiniciar app: ${e.message}")
@@ -163,11 +222,13 @@ class CommandService : Service() {
     private fun setKioskMode(packageName: String) {
         val config = DeviceConfigStore.getConfig(this)
         DeviceConfigStore.saveAppSelection(this, config.controlledPackages, packageName)
+        KioskManager.syncLockTaskPackages(this, config.controlledPackages)
+        extendKioskGrace(KIOSK_RECOVERY_GRACE_MS)
         serviceScope.launch {
             syncRemoteKioskSelection(config.controlledPackages, packageName)
         }
         Log.i("CommandService", "App de quiosque definido: $packageName")
-        openApp(packageName)
+        bringPackageToFront(packageName, enableKioskLock = true)
     }
 
     private suspend fun resolveKioskPackage(config: DeviceConfigStore.AppSelection): String? {
@@ -191,22 +252,57 @@ class CommandService : Service() {
         }
     }
 
-    private fun openApp(packageName: String) {
-        try {
-            val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
-            if (launchIntent != null) {
-                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                startActivity(launchIntent)
-            } else {
-                Log.e("CommandService", "Nao foi possivel obter intent para $packageName")
-            }
-        } catch (e: Exception) {
-            Log.e("CommandService", "Erro ao abrir app: ${e.message}")
+    private suspend fun enforceKioskIfNeeded(force: Boolean) {
+        val config = DeviceConfigStore.getConfig(this)
+        val kioskPackage = config.kioskPackage?.takeIf { config.controlledPackages.contains(it) } ?: return
+
+        KioskManager.syncLockTaskPackages(this, config.controlledPackages)
+
+        if (!force && System.currentTimeMillis() < kioskGraceUntilMs) {
+            return
+        }
+
+        val currentPackage = KioskManager.getForegroundPackage(this) ?: return
+        if (currentPackage == kioskPackage || currentPackage == packageName) {
+            return
+        }
+
+        Log.i("CommandService", "Foreground fora do kiosk detectado: $currentPackage. Restaurando $kioskPackage")
+        bringPackageToFront(kioskPackage, enableKioskLock = true)
+        extendKioskGrace(KIOSK_RECOVERY_GRACE_MS)
+    }
+
+    private fun bringPackageToFront(packageName: String, enableKioskLock: Boolean) {
+        val opened = KioskManager.launchPackage(this, packageName, enableKioskLock)
+        if (!opened) {
+            Log.e("CommandService", "Nao foi possivel abrir app $packageName")
         }
     }
 
     private fun restartDevice() {
-        Log.i("CommandService", "Reiniciando dispositivo (placeholder)")
+        val rebooted = KioskManager.rebootDevice(this)
+        if (!rebooted) {
+            Log.w("CommandService", "Reboot remoto indisponivel sem Device Owner ativo.")
+        }
+    }
+
+    private fun extendKioskGrace(durationMs: Long) {
+        kioskGraceUntilMs = System.currentTimeMillis() + durationMs
+    }
+
+    private fun restartSelf(triggerLaunch: Boolean) {
+        if (!allowSelfRestart || !DeviceConfigStore.isRegistered(this)) {
+            return
+        }
+
+        ContextCompat.startForegroundService(
+            this,
+            Intent(this, CommandService::class.java).apply {
+                if (triggerLaunch) {
+                    putExtra(EXTRA_TRIGGER_LAUNCH, true)
+                }
+            }
+        )
     }
 
     private fun buildNotification(contentText: String): Notification {
@@ -228,27 +324,41 @@ class CommandService : Service() {
                 "Device Control",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Mantem o servico de controle remoto ativo"
+                description = "Mantem o servico de controle remoto e kiosk ativo"
             }
             manager.createNotificationChannel(channel)
         }
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        restartSelf(triggerLaunch = false)
+        super.onTaskRemoved(rootIntent)
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
         pollingJob?.cancel()
+        kioskWatchdogJob?.cancel()
         serviceScope.cancel()
+        restartSelf(triggerLaunch = false)
         super.onDestroy()
     }
 
     companion object {
+        const val ACTION_RESTART_PACKAGE = "com.devicecontrolkiosk.action.RESTART_PACKAGE"
+        const val ACTION_ENSURE_KIOSK = "com.devicecontrolkiosk.action.ENSURE_KIOSK"
         const val EXTRA_TRIGGER_LAUNCH = "extra_trigger_launch"
+        const val EXTRA_PACKAGE_NAME = "extra_package_name"
         private const val CHANNEL_ID = "device_control_service"
         private const val NOTIFICATION_ID = 1001
+        private const val POLLING_INTERVAL_MS = 10_000L
+        private const val KIOSK_WATCHDOG_INTERVAL_MS = 1_500L
         private const val APP_LAUNCH_DELAY_MS = 2_000L
         private const val KIOSK_LAUNCH_DELAY_MS = 10_000L
         private const val KIOSK_RESTORE_DELAY_MS = 3_000L
+        private const val KIOSK_LAUNCH_GRACE_MS = 20_000L
+        private const val KIOSK_RECOVERY_GRACE_MS = 4_000L
         private const val RESTART_DELAY_MS = 1_500L
     }
 }

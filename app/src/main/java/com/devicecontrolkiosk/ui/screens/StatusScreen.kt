@@ -7,6 +7,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -31,12 +33,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.navigation.NavController
 import com.devicecontrolkiosk.data.DeviceConfigStore
 import com.devicecontrolkiosk.data.SupabaseApi
+import com.devicecontrolkiosk.kiosk.KioskManager
 import com.devicecontrolkiosk.service.CommandService
 import kotlinx.coroutines.launch
 
@@ -48,11 +52,12 @@ data class InstalledApp(
 @Composable
 fun StatusScreen(navController: NavController) {
     val context = navController.context
-    val config = remember { DeviceConfigStore.getConfig(context) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var config by remember { mutableStateOf(DeviceConfigStore.getConfig(context)) }
     var installedApps by remember { mutableStateOf(emptyList<InstalledApp>()) }
     var selectedPackages by remember { mutableStateOf(config.controlledPackages) }
     var kioskPackage by remember { mutableStateOf(config.kioskPackage) }
-    var statusMessage by remember { mutableStateOf("Monitorando comandos remotos") }
+    var statusMessage by remember { mutableStateOf("Monitorando comandos remotos e kiosk") }
     var selectionError by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     val powerManager = remember { context.getSystemService(PowerManager::class.java) }
@@ -60,12 +65,36 @@ fun StatusScreen(navController: NavController) {
     var ignoringBatteryOptimizations by remember {
         mutableStateOf(powerManager?.isIgnoringBatteryOptimizations(context.packageName) == true)
     }
+    var usageAccessGranted by remember { mutableStateOf(KioskManager.canMonitorForeground(context)) }
+    var deviceAdminActive by remember { mutableStateOf(KioskManager.isAdminActive(context)) }
+    var deviceOwnerActive by remember { mutableStateOf(KioskManager.isDeviceOwner(context)) }
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
         notificationsGranted = granted
         if (!granted) {
             statusMessage = "Permissao de notificacao negada. O servico pode ficar oculto."
+        }
+    }
+
+    fun refreshAccessState() {
+        config = DeviceConfigStore.getConfig(context)
+        notificationsGranted = hasNotificationPermission(context)
+        ignoringBatteryOptimizations = powerManager?.isIgnoringBatteryOptimizations(context.packageName) == true
+        usageAccessGranted = KioskManager.canMonitorForeground(context)
+        deviceAdminActive = KioskManager.isAdminActive(context)
+        deviceOwnerActive = KioskManager.isDeviceOwner(context)
+    }
+
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                refreshAccessState()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
         }
     }
 
@@ -95,6 +124,18 @@ fun StatusScreen(navController: NavController) {
                     "Notificacao: ${if (notificationsGranted) "ok" else "pendente"} | Bateria: ${if (ignoringBatteryOptimizations) "liberado" else "restrito"}",
                     style = MaterialTheme.typography.bodyMedium
                 )
+                Text(
+                    "Uso: ${if (usageAccessGranted) "ok" else "pendente"} | Admin: ${if (deviceAdminActive) "ok" else "pendente"} | Device Owner: ${if (deviceOwnerActive) "ok" else "pendente"}",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Text(
+                    if (deviceOwnerActive) {
+                        "Modo kiosk real e reboot remoto habilitados."
+                    } else {
+                        "Sem Device Owner o app ainda força o retorno do kiosk, mas o lock task real depende dessa configuracao."
+                    },
+                    style = MaterialTheme.typography.bodySmall
+                )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(
                         onClick = {
@@ -117,6 +158,24 @@ fun StatusScreen(navController: NavController) {
                         Text("Liberar bateria")
                     }
                 }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = {
+                            KioskManager.openUsageAccessSettings(context)
+                        },
+                        enabled = !usageAccessGranted
+                    ) {
+                        Text("Liberar uso")
+                    }
+                    Button(
+                        onClick = {
+                            context.startActivity(KioskManager.buildAddDeviceAdminIntent(context))
+                        },
+                        enabled = !deviceAdminActive
+                    ) {
+                        Text("Ativar admin")
+                    }
+                }
             }
         }
 
@@ -124,7 +183,7 @@ fun StatusScreen(navController: NavController) {
             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Selecione exatamente 2 apps", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    "Escolhidos: ${selectedPackages.size}/2. O app marcado como quiosque sera aberto por ultimo no boot e a escolha sera espelhada no Supabase.",
+                    "Escolhidos: ${selectedPackages.size}/2. O app marcado como quiosque sera aberto por ultimo no boot, restaurado se sair do foco e a escolha sera espelhada no Supabase.",
                     style = MaterialTheme.typography.bodyMedium
                 )
                 if (selectedPackages.isNotEmpty()) {
@@ -132,6 +191,52 @@ fun StatusScreen(navController: NavController) {
                 }
                 selectionError?.let {
                     Text(it, color = MaterialTheme.colorScheme.error)
+                }
+            }
+        }
+
+        if (selectedPackages.isNotEmpty()) {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Acoes rapidas", style = MaterialTheme.typography.titleMedium)
+                    selectedPackages.forEachIndexed { index, packageName ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("App ${index + 1}: $packageName", modifier = Modifier.weight(1f))
+                            Button(
+                                onClick = {
+                                    ContextCompat.startForegroundService(
+                                        context,
+                                        Intent(context, CommandService::class.java).apply {
+                                            action = CommandService.ACTION_RESTART_PACKAGE
+                                            putExtra(CommandService.EXTRA_PACKAGE_NAME, packageName)
+                                        }
+                                    )
+                                    statusMessage = "Reinicio solicitado para $packageName"
+                                }
+                            ) {
+                                Text("Reiniciar")
+                            }
+                        }
+                    }
+                    Button(
+                        onClick = {
+                            ContextCompat.startForegroundService(
+                                context,
+                                Intent(context, CommandService::class.java).apply {
+                                    action = CommandService.ACTION_ENSURE_KIOSK
+                                }
+                            )
+                            statusMessage = "Kiosk reforcado manualmente."
+                        },
+                        enabled = kioskPackage != null,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Ativar kiosk agora")
+                    }
                 }
             }
         }
@@ -190,8 +295,6 @@ fun StatusScreen(navController: NavController) {
                                     Text("Definir como app de quiosque")
                                 }
                             }
-                        }
-                        if (isSelected) {
                             Text(
                                 "Posicao: ${selectedPackages.indexOf(app.packageName) + 1}",
                                 style = MaterialTheme.typography.bodySmall
@@ -209,7 +312,8 @@ fun StatusScreen(navController: NavController) {
                     kioskPackage == null -> selectionError = "Escolha qual dos 2 apps sera o quiosque."
                     else -> {
                         DeviceConfigStore.saveAppSelection(context, selectedPackages.toList(), kioskPackage)
-                        statusMessage = "Configuracao salva. Sincronizando modo kiosk no Supabase."
+                        config = DeviceConfigStore.getConfig(context)
+                        statusMessage = "Configuracao salva. Iniciando apps e sincronizando kiosk."
                         selectionError = null
                         scope.launch {
                             val deviceId = DeviceConfigStore.getConfig(context).deviceId
@@ -219,9 +323,9 @@ fun StatusScreen(navController: NavController) {
                                 false
                             }
                             statusMessage = if (synced) {
-                                "Configuracao salva e tabela remota atualizada."
+                                "Configuracao salva, apps iniciados e tabela remota atualizada."
                             } else {
-                                "Configuracao salva localmente, mas a tabela remota nao foi atualizada."
+                                "Configuracao salva e apps iniciados, mas a tabela remota nao foi atualizada."
                             }
                             ContextCompat.startForegroundService(
                                 context,
@@ -262,3 +366,4 @@ private fun hasNotificationPermission(context: android.content.Context): Boolean
             Manifest.permission.POST_NOTIFICATIONS
         ) == PackageManager.PERMISSION_GRANTED
 }
+

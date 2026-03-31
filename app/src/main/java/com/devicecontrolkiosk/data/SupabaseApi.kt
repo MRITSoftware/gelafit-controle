@@ -18,7 +18,9 @@ import java.time.Instant
 object SupabaseApi {
     private const val BASE_URL = "https://kihyhoqbrkwbfudttevo.supabase.co/rest/v1/"
     private const val API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtpaHlob3Ficmt3YmZ1ZHR0ZXZvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MTU1NTUwMjcsImV4cCI6MjAzMTEzMTAyN30.XtBTlSiqhsuUIKmhAMEyxofV-dRst7240n912m4O4Us"
-    const val KIOSK_MODE_TABLE = "device_kiosk_modes"
+    private const val DEVICES_TABLE = "control_devices"
+    private const val COMMANDS_TABLE = "control_commands"
+    const val KIOSK_MODE_TABLE = "control_kiosk_modes"
     private val jsonMediaType = "application/json".toMediaType()
     private val client = OkHttpClient()
     private val moshi = Moshi.Builder().add(KotlinJsonAdapterFactory()).build()
@@ -34,9 +36,9 @@ object SupabaseApi {
         val request = Request.Builder()
             .url(
                 if (existingDevice == null) {
-                    "${BASE_URL}devices"
+                    "${BASE_URL}${DEVICES_TABLE}"
                 } else {
-                    "${BASE_URL}devices?id=eq.${existingDevice.id}"
+                    "${BASE_URL}${DEVICES_TABLE}?id=eq.${existingDevice.id}"
                 }
             )
             .addHeader("apikey", API_KEY)
@@ -62,7 +64,7 @@ object SupabaseApi {
 
     suspend fun pollCommands(deviceId: String): List<DeviceCommand> = withContext(Dispatchers.IO) {
         val request = Request.Builder()
-            .url("${BASE_URL}device_commands?device_id=eq.$deviceId&executed=is.false&order=created_at.desc")
+            .url("${BASE_URL}${COMMANDS_TABLE}?device_id=eq.$deviceId&executed=is.false&order=created_at.desc")
             .addHeader("apikey", API_KEY)
             .addHeader("Authorization", "Bearer $API_KEY")
             .get()
@@ -88,7 +90,7 @@ object SupabaseApi {
     suspend fun markCommandExecuted(commandId: String): Boolean = withContext(Dispatchers.IO) {
         val json = """{"executed":true,"executed_at":"${Instant.now()}"}"""
         val request = Request.Builder()
-            .url("${BASE_URL}device_commands?id=eq.$commandId")
+            .url("${BASE_URL}${COMMANDS_TABLE}?id=eq.$commandId")
             .addHeader("apikey", API_KEY)
             .addHeader("Authorization", "Bearer $API_KEY")
             .addHeader("Content-Type", "application/json")
@@ -185,7 +187,7 @@ object SupabaseApi {
     private fun findDeviceByUnitEmail(unitEmail: String): RegisteredDevice? {
         val encodedEmail = encodeValue(unitEmail)
         val request = Request.Builder()
-            .url("${BASE_URL}devices?select=id,device_id,unit_name&unit_name=eq.$encodedEmail&limit=1")
+            .url("${BASE_URL}${DEVICES_TABLE}?select=id,device_id,unit_name&unit_name=eq.$encodedEmail&limit=1")
             .addHeader("apikey", API_KEY)
             .addHeader("Authorization", "Bearer $API_KEY")
             .get()
@@ -233,3 +235,4 @@ data class DeviceKioskMode(
     @Json(name = "package_name") val packageName: String?,
     @Json(name = "is_kiosk") val isKiosk: Boolean?
 )
+
